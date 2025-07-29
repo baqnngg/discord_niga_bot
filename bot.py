@@ -1,522 +1,210 @@
+# bot.py
 import asyncio
 import discord
-import yt_dlp
-from discord.ext import commands
+from discord.ext import commands, tasks
 import random
-import stock  # 주식 시스템 파일
-from datetime import datetime, timedelta
+import stock
+from datetime import datetime
 import os
+import traceback
+import sys
 from dotenv import load_dotenv
 
+# --- 초기 설정 ---
 load_dotenv()
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    print("오류: .env 파일에 DISCORD_TOKEN이 설정되지 않았습니다.", file=sys.stderr)
+    exit()
 
-intents = discord.Intents.all()
-client = commands.Bot(command_prefix="!", intents=intents)
-
+# 상수 정의
+PREFIX = "!"
 DAILY_REWARD = 10000
-USER_FILE = "users.json"
 
-class StockBot(commands.Bot):
-    async def setup_hook(self):
-        self.loop.create_task(self.auto_update_stock())  # 봇 시작 시 자동으로 주식 갱신
+# 봇 인텐트 설정
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.voice_states = True
 
-    async def auto_update_stock(self):
-        await self.wait_until_ready()  # 봇이 준비될 때까지 대기
-        while not self.is_closed():
-            stock.update_stock_prices()
-            print("📈 주식 가격이 자동 갱신되었습니다!")
-            await asyncio.sleep(60)  # 30초마다 실행
+# --- 주식 및 기타 기능 Cog ---
+class General(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
 
-# 봇 인스턴스 생성 (StockBot 클래스 사용)
-client = StockBot(command_prefix="!", intents=intents)
-
-# YouTube 다운로드 옵션 설정
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'quiet': True,
-    'default_search': 'ytsearch',
-}
-ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn',
-}
-ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
-
-queue = []  # 음악 재생 대기열
-
-async def connect_to_voice_channel(ctx):
-    if ctx.author.voice is None:
-        await ctx.send("음성 채널에 먼저 들어가 주세요.")
-        return None
-
-    channel = ctx.author.voice.channel
-    vc = ctx.voice_client
-
-    if vc is None or not vc.is_connected():
-        vc = await channel.connect()
-        await ctx.send(f"{ctx.author.mention} 님의 채널에 접속했습니다!")
-    return vc
-
-@client.event
-async def on_ready():
-    print("봇이 준비되었습니다.")
-    await client.change_presence(status=discord.Status.online, activity=discord.Game("음악 재생 및 주식 거래"))
-
-# 🎵 음악 관련 명령어 ------------------------------------------------
-
-@client.command(name='들어와')
-async def 들어와(ctx):
-    await connect_to_voice_channel(ctx)
-
-@client.command(name='나가')
-async def 나가(ctx):
-    vc = ctx.voice_client
-    if vc:
-        await vc.disconnect()
-        await ctx.send("🔌 봇이 음성 채널에서 나갔습니다.")
-    else:
-        await ctx.send("❌ 봇이 현재 음성 채널에 연결되어 있지 않습니다.")
-
-@client.command(name='불러봐', aliases=['불러', 'p'])
-async def 불러봐(ctx, *, title):
-    vc = await connect_to_voice_channel(ctx)
-    if vc is None:
-        return
-
-    async with ctx.typing():
+    @commands.command(name='주식목록', aliases=['주식'])
+    async def stock_list(self, ctx: commands.Context):
+        """현재 주식 목록과 변동률을 임베드로 보여줍니다."""
         try:
-            info = ytdl.extract_info(f"ytsearch:{title}", download=False)
-            if 'entries' not in info or len(info['entries']) == 0:
-                await ctx.send("⚠️ 검색 결과를 찾을 수 없습니다.")
-                return
-
-            video = info['entries'][0]
-            url2 = video['url']
-            song_title = video.get('title', 'Unknown Title')
-
-            if vc.is_playing():
-                queue.append((url2, song_title))
-                await ctx.send(f"📌 **{song_title}**을(를) 대기열에 추가했습니다.")
-                return
-
-            vc.play(discord.FFmpegPCMAudio(url2, **ffmpeg_options), 
-                    after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), client.loop))
-
-            await ctx.send(f'🎵 **{song_title}**을(를) 재생합니다!')
-        except yt_dlp.utils.DownloadError as e:
-            await ctx.send(f"⚠️ 다운로드 오류 발생: {e}")
+            embed = discord.Embed(title="📈 현재 주식 목록 📈", color=discord.Color.gold())
+            description = []
+            for name, price in stock.stocks.items():
+                _, percent_change = stock.stock_changes.get(name, (0, 0))
+                symbol = "🔺" if percent_change > 0 else ("🔻" if percent_change < 0 else "➖")
+                change_str = f"{symbol} {percent_change:+.2f}%"
+                description.append(f"**{name}**: `${price:,.2f}` ({change_str})")
+            
+            embed.description = "\n".join(description) if description else "현재 주식 정보가 없습니다."
+            await ctx.send(embed=embed)
         except Exception as e:
-            await ctx.send(f"⚠️ 오류 발생: {e}")
+            await ctx.send("주식 목록을 불러오는 중 오류가 발생했습니다.")
+            print(f"주식목록 오류: {e}", file=sys.stderr)
 
-async def play_next(ctx):
-    vc = ctx.voice_client
-    if vc is None or not vc.is_connected():
-        return
-
-    if len(queue) > 0:
-        url2, title = queue.pop(0)
-
-        def after_playing(error):
-            if error:
-                print(f"Player error: {error}")
-            asyncio.run_coroutine_threadsafe(play_next(ctx), client.loop)
-
-        vc.play(discord.FFmpegPCMAudio(url2, **ffmpeg_options), after=after_playing)
-        client.loop.create_task(ctx.send(f'🎵 현재 재생하는 곡 **{title}**'))
-    else:
-        client.loop.create_task(ctx.send("✅ 대기열이 비어 있습니다."))
-
-@client.command(name='대기열')
-async def 대기열(ctx):
-    vc = ctx.voice_client
-
-    if vc is None or not vc.is_connected():
-        await ctx.send("❌ 봇이 음성 채널에 연결되어 있지 않습니다.")
-        return
-
-    current_song = None
-    if vc.is_playing() and len(queue) > 0:
-        current_song = queue[0][1]
-
-    if len(queue) == 0:
-        message = "📭 대기열이 비어 있습니다."
-    else:
-        queue_list = "\n".join([f"{idx+1}. {title}" for idx, (_, title) in enumerate(queue)])
-        message = f"📜 **대기열 목록**:\n{queue_list}"
-
-    if current_song:
-        message = f"🎵 현재 재생 중: **{current_song}**\n\n" + message
-
-    await ctx.send(message)
-
-# 📈 주식 시스템 연동 ------------------------------------------------
-
-@client.command(name='주식목록', aliases=['주식'])
-async def 주식목록(ctx):
-    """현재 주식 목록과 가격 확인 (정렬 수정, 소수점 2자리 유지)"""
-    stocks = stock.stocks  # 현재 주식 데이터
-    changes = stock.stock_changes  # 변동 내역 (가격 변동량, 변동 퍼센트 저장)
-
-    stock_list = "📈 **현재 주식 목록** 📈\n```\n"
-    stock_list += f"{'이름':<12}|{'가격':<12}|{'변동':<12}\n"
-    stock_list += "-" * 42 + "\n"
-
-    for name, price in stocks.items():
-        change_amount, percent_change = changes.get(name, (0, 0))  # 변동 데이터 없으면 기본값 (0, 0)
-
-        # 상승(🟥), 하락(🟦), 유지(➡)
-        change_symbol = "🟥" if percent_change > 0 else ("🟦" if percent_change < 0 else "➡")
-        change_str = f"{change_symbol} {percent_change:+.2f}%" if percent_change != 0 else " - "
-
-        stock_list += f"{name:<12} | ${price:>11,.2f} | {change_str:>11}\n"
-
-    stock_list += "```"
-    await ctx.send(stock_list)
-
-@client.command(name='주식구매')
-async def 주식구매(ctx, 주식명: str, 수량: str):
-    """주식 구매"""
-    user_id = str(ctx.author.id)
-
-    # "all" 입력 시 그대로 전달, 숫자면 정수로 변환
-    if 수량.lower() != "all":
-        if not 수량.isdigit():
-            await ctx.send("❌ 수량은 숫자 또는 'all'이어야 합니다.")
-            return
-        수량 = int(수량)
-
-    success, result = stock.buy_stock(user_id, 주식명, 수량)
-
-    if success:
-        await ctx.send(f"✅ {주식명} 주식 {수량}주를 구매했습니다. 현재 잔액: ${result:.2f}")
-    else:
-        await ctx.send(result)
-
-@client.command(name="주식판매")
-async def 주식판매(ctx, 주식명: str, 수량: str):
-    user_id = str(ctx.author.id)
-    if 수량.lower() == 'all':
-        # 보유 주식 전량 가져오기
-        amount = stock.get_user_stock_amount(user_id, 주식명)
-        if amount == 0:
-            await ctx.send("해당 주식을 보유하고 있지 않습니다.")
-            return
-        수량_int = amount
-    else:
-        try:
-            수량_int = int(수량)
-        except ValueError:
-            await ctx.send("수량은 정수여야 합니다.")
-            return
-
-    result = stock.sell_stock(user_id, 주식명, 수량_int)
-    await ctx.send(result)
-
-
-@client.command(name='내자산', aliases=['내주식', '나'])
-async def 내자산(ctx):
-    """보유 주식 및 잔액 확인 (닉네임 사용)"""
-    user_id = str(ctx.author.id)
-    user_name = ctx.author.display_name
-    result = stock.get_portfolio(user_id)
-    await ctx.send(f"💰 **{user_name}님의 자산 현황** 💰{result}")
-
-# @client.command(name='주식갱신')
-# async def 주식갱신(ctx):
-#     """관리자가 주식 가격 갱신"""
-#     stock.update_stock_prices()
-#     await ctx.send("📈 주식 가격이 갱신되었습니다!")
-
-# 🎲 기타 명령어 ------------------------------------------------
-
-@client.command(name="랭킹")
-async def 랭킹(ctx):
-    """개선된 랭킹 시스템 - 더 예쁘고 상세한 정보 제공"""
-    users = stock.load_users()
-    ranking_list = []
-
-    for user_id, user_data in users.items():
-        balance = user_data.get("balance", 0)
-        total_stock_value = 0
-
-        stocks_owned = user_data.get("stocks", {})
-        for stock_name, qty in stocks_owned.items():
-            if isinstance(qty, list):
-                qty = int(qty[0])
-            price = stock.stocks.get(stock_name, 0)
-            if isinstance(price, list):
-                price = float(price[0])
-            total_stock_value += price * qty
-
-        total_assets = balance + total_stock_value
-        ranking_list.append((user_id, total_assets, balance, total_stock_value))
-
-    # 자산 기준으로 정렬
-    ranking_list.sort(key=lambda x: x[1], reverse=True)
-
-    if not ranking_list:
-        await ctx.send("📊 아직 등록된 사용자가 없습니다!")
-        return
-
-    # 상위 10명만 표시
-    top_users = ranking_list[:10]
-    
-    # 임베드 메시지로 더 예쁘게 만들기
-    embed = discord.Embed(
-        title="🏆 주식왕 랭킹 🏆",
-        description="*총 자산 = 현금 + 보유 주식 가치*",
-        color=0xFFD700  # 금색
-    )
-    
-    # 순위별 이모지와 색상
-    rank_emojis = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    
-    ranking_text = ""
-    
-    for i, (user_id, total_assets, balance, stock_value) in enumerate(top_users):
-
-        member = ctx.guild.get_member(int(user_id))
-        if member is None:
-            try:
-                member = await ctx.guild.fetch_member(int(user_id))
-            except Exception:
-                member = None
-
-        if member:
-            name = member.display_name
+    @commands.command(name='주식구매')
+    async def buy_stock(self, ctx: commands.Context, stock_name: str, amount_str: str):
+        """지정한 수량만큼 주식을 구매합니다."""
+        user_id = str(ctx.author.id)
+        if amount_str.lower() != "all" and (not amount_str.isdigit() or int(amount_str) <= 0):
+            return await ctx.send("❌ 수량은 0보다 큰 숫자 또는 'all'이어야 합니다.")
+        
+        amount = "all" if amount_str.lower() == "all" else int(amount_str)
+        success, result = stock.buy_stock(user_id, stock_name, amount)
+        
+        if success:
+            embed = discord.Embed(title="✅ 주식 구매 완료", color=discord.Color.green())
+            embed.add_field(name="종목", value=stock_name, inline=True)
+            embed.add_field(name="수량", value=f"{result['amount']}주", inline=True)
+            embed.add_field(name="총 구매액", value=f"`${result['total_cost']:,.2f}`", inline=False)
+            embed.add_field(name="현재 잔액", value=f"`${result['new_balance']:,.2f}`", inline=False)
+            await ctx.send(embed=embed)
         else:
+            await ctx.send(f"❌ 구매 실패: {result}")
+
+    @commands.command(name="주식판매")
+    async def sell_stock(self, ctx: commands.Context, stock_name: str, amount_str: str):
+        """보유한 주식을 판매합니다."""
+        user_id = str(ctx.author.id)
+        if amount_str.lower() != 'all' and (not amount_str.isdigit() or int(amount_str) <= 0):
+            return await ctx.send("❌ 수량은 0보다 큰 숫자 또는 'all'이어야 합니다.")
+        
+        amount_to_sell = "all" if amount_str.lower() == 'all' else int(amount_str)
+        success, result = stock.sell_stock(user_id, stock_name, amount_to_sell)
+        if success:
+            embed = discord.Embed(title="✅ 주식 판매 완료", color=discord.Color.blue())
+            embed.add_field(name="종목", value=stock_name, inline=True)
+            embed.add_field(name="수량", value=f"{result['amount']}주", inline=True)
+            embed.add_field(name="총 판매액", value=f"`${result['total_revenue']:,.2f}`", inline=False)
+            embed.add_field(name="현재 잔액", value=f"`${result['new_balance']:,.2f}`", inline=False)
+            await ctx.send(embed=embed)
+        else:
+            await ctx.send(f"❌ 판매 실패: {result}")
+
+    @commands.command(name='내자산', aliases=['내주식', '나'])
+    async def my_assets(self, ctx: commands.Context):
+        """사용자의 현재 자산 현황을 보여줍니다."""
+        result_text = stock.get_portfolio(str(ctx.author.id))
+        embed = discord.Embed(title=f"💰 {ctx.author.display_name}님의 자산 현황", description=result_text, color=discord.Color.purple())
+        await ctx.send(embed=embed)
+
+    @commands.command(name="랭킹")
+    async def ranking(self, ctx: commands.Context):
+        """서버 내 주식 부자 랭킹을 보여줍니다."""
+        users = stock.load_users()
+        if not users:
+            return await ctx.send("📊 아직 등록된 사용자가 없습니다!")
+
+        ranking_list = sorted([(uid, stock.calculate_total_assets(uid)) for uid in users], key=lambda x: x[1], reverse=True)
+        top_users = ranking_list[:10]
+
+        embed = discord.Embed(title="🏆 주식왕 랭킹 🏆", description="*총 자산 = 현금 + 보유 주식 가치*", color=0xFFD700)
+        rank_emojis = ["🥇", "🥈", "🥉"]
+        text_lines = []
+
+        for i, (user_id, total_assets) in enumerate(top_users):
             try:
-                user = await bot.fetch_user(int(user_id))
-                name = user.name
-            except Exception:
-                # fallback
-                user_stocks = users.get(user_id, {}).get("stocks", {})
-                if user_stocks:
-                    max_stock = max(user_stocks.items(), key=lambda x: int(x[1][0]))
-                    stock_name = max_stock[0]
-                    short_id = str(user_id)[-4:]
-                    name = f"{stock_name} 투자자#{short_id}"
-                else:
-                    short_id = str(user_id)[-4:]
-                    name = f"💼 외부 투자자#{short_id}"
-
-
+                member = ctx.guild.get_member(int(user_id)) or await self.bot.fetch_user(int(user_id))
+                name = member.display_name
+            except (discord.NotFound, discord.HTTPException):
+                name = f"알 수 없는 유저 ({str(user_id)[-4:]})"
+            
+            emoji = rank_emojis[i] if i < 3 else f"**{i+1}위**"
+            text_lines.append(f"{emoji} {name} - `₩{total_assets:,.0f}`")
         
-        # 순위 이모지
-        rank_emoji = rank_emojis[i] if i < len(rank_emojis) else f"{i+1}위"
+        embed.description = "\n".join(text_lines) or "랭킹 정보 없음"
         
-        # 자산 비율 계산
-        cash_ratio = (balance / total_assets * 100) if total_assets > 0 else 0
-        stock_ratio = (stock_value / total_assets * 100) if total_assets > 0 else 0
-        
-        # 프로그레스 바 만들기 (간단한 버전)
-        progress_bar = "▰" * min(10, int(total_assets / max(ranking_list[0][1], 1) * 10))
-        progress_bar += "▱" * (10 - len(progress_bar))
-        
-        ranking_text += f"{rank_emoji} **{name}**\n"
-        ranking_text += f"💰 총 자산: `₩{total_assets:,.0f}`\n"
-        ranking_text += f"💵 현금: `₩{balance:,.0f}` ({cash_ratio:.1f}%)\n"
-        ranking_text += f"📈 주식: `₩{stock_value:,.0f}` ({stock_ratio:.1f}%)\n"
-        ranking_text += f"📊 {progress_bar}\n\n"
-    
-    embed.add_field(
-        name="📋 순위표",
-        value=ranking_text,
-        inline=False
-    )
-    
-    # 통계 정보 추가
-    total_users = len(ranking_list)
-    avg_assets = sum([assets for _, assets, _, _ in ranking_list]) / total_users if total_users > 0 else 0
-    
-    embed.add_field(
-        name="📈 전체 통계",
-        value=f"👥 총 참여자: {total_users}명\n📊 평균 자산: ₩{avg_assets:,.0f}",
-        inline=True
-    )
-    
-    # 현재 사용자 순위 찾기
-    user_rank = None
-    for i, (user_id, _, _, _) in enumerate(ranking_list):
-        if user_id == str(ctx.author.id):
-            user_rank = i + 1
-            break
-    
-    if user_rank:
-        embed.add_field(
-            name="🎯 내 순위",
-            value=f"{ctx.author.display_name}님은 **{user_rank}위**입니다!",
-            inline=True
-        )
-    
-    # 푸터 추가
-    embed.set_footer(text=f"마지막 업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    
-    await ctx.send(embed=embed)
-
-# 추가: 개인 상세 정보 명령어
-@client.command(name="내순위")
-async def 내순위(ctx):
-    """내 개인 순위와 상세 정보 확인"""
-    user_id = str(ctx.author.id)
-    users = stock.load_users()
-    
-    if user_id not in users:
-        await ctx.send("❌ 아직 주식 시스템을 이용한 기록이 없습니다. `!출석`으로 시작해보세요!")
-        return
-    
-    # 전체 랭킹 계산
-    ranking_list = []
-    for uid, user_data in users.items():
-        balance = user_data.get("balance", 0)
-        total_stock_value = 0
-        
-        stocks_owned = user_data.get("stocks", {})
-        for stock_name, qty in stocks_owned.items():
-            if isinstance(qty, list):
-                qty = int(qty[0])
-            price = stock.stocks.get(stock_name, 0)
-            if isinstance(price, list):
-                price = float(price[0])
-            total_stock_value += price * qty
-        
-        total_assets = balance + total_stock_value
-        ranking_list.append((uid, total_assets, balance, total_stock_value))
-    
-    ranking_list.sort(key=lambda x: x[1], reverse=True)
-    
-    # 내 순위 찾기
-    my_rank = None
-    my_data = None
-    for i, (uid, assets, balance, stock_value) in enumerate(ranking_list):
-        if uid == user_id:
-            my_rank = i + 1
-            my_data = (assets, balance, stock_value)
-            break
-    
-    if my_rank is None:
-        await ctx.send("❌ 순위 정보를 찾을 수 없습니다.")
-        return
-    
-    total_assets, balance, stock_value = my_data
-    
-    # 임베드 생성
-    embed = discord.Embed(
-        title=f"📊 {ctx.author.display_name}님의 상세 정보",
-        color=0x00FF00 if my_rank <= 3 else (0xFFFF00 if my_rank <= 10 else 0xFF0000)
-    )
-    
-    # 순위에 따른 이모지
-    if my_rank == 1:
-        rank_emoji = "🥇"
-    elif my_rank == 2:
-        rank_emoji = "🥈"
-    elif my_rank == 3:
-        rank_emoji = "🥉"
-    else:
-        rank_emoji = "🏅"
-    
-    embed.add_field(
-        name=f"{rank_emoji} 현재 순위",
-        value=f"**{my_rank}위** / {len(ranking_list)}명",
-        inline=True
-    )
-    
-    embed.add_field(
-        name="💰 총 자산",
-        value=f"₩{total_assets:,.0f}",
-        inline=True
-    )
-    
-    embed.add_field(
-        name="📈 자산 구성",
-        value=f"💵 현금: ₩{balance:,.0f}\n📊 주식: ₩{stock_value:,.0f}",
-        inline=True
-    )
-    
-    # 상위권과의 차이
-    if my_rank > 1:
-        gap_to_top = ranking_list[0][1] - total_assets
-        gap_to_prev = ranking_list[my_rank-2][1] - total_assets
-        embed.add_field(
-            name="🎯 격차 분석",
-            value=f"1위와 차이: ₩{gap_to_top:,.0f}\n{my_rank-1}위와 차이: ₩{gap_to_prev:,.0f}",
-            inline=False
-        )
-    
-    await ctx.send(embed=embed)
-
-@client.command(name='재비뽑기', aliases=['재비', '뽑기'])
-async def 재비뽑기(ctx, *이름들):
-    if len(이름들) < 2:
-        await ctx.send("2명 이상 입력해주세요! 예시: `!재비뽑기 철수 영희 민수`")
-        return
-
-    당첨자 = random.choice(이름들)
-    await ctx.send(f"🎉 당첨자는 **{당첨자}** 입니다! 🎉")
-
-@client.command(name='도움말')
-async def 도움말(ctx):
-    """사용 가능한 명령어 목록을 출력"""
-    help_text = """
-    **🎵 음악 명령어**
-    `!들어와` - 봇을 음성 채널로 초대
-    `!나가` - 봇을 음성 채널에서 내보냄
-    `!불러봐 [노래 제목]` - 유튜브에서 노래를 검색하고 재생
-    `!대기열` - 현재 대기열 확인
-
-    **💹 주식 명령어**
-    `!주식목록` - 현재 등록된 주식 목록을 확인
-    `!주식구매 [주식명] [수량]` - 주식을 구매
-    `!주식판매 [주식명] [수량]` - 보유한 주식을 판매
-    `!주식정보 [주식명]` - 특정 주식의 현재 가격과 정보 조회
-    `!내주식` - 사용자가 보유한 주식 목록 확인
-    `!주식변동` - 랜덤으로 주가 변동 (관리자 전용)
-
-    **🎲 기타 명령어**
-    `!재비뽑기 이름1 이름2 ...` - 랜덤으로 한 명을 뽑음
-    `!도움말` - 이 도움말을 표시
-    `!랭킹` - 랭킹을 표시
-    `!내순위` - 내순위 표시
-
-    🔹 사용 예시:
-    `!불러봐 밤양갱` → "밤양갱" 노래 재생
-    `!재비뽑기 철수 영희 민수` → 랜덤으로 한 명 선정
-    `!주식구매 삼성전자 10` → 삼성전자 주식 10주 구매
-    """
-
-    await ctx.send(help_text)
-
-@client.command(name='출석')
-async def 출석(ctx):
-    user_id = str(ctx.author.id)
-    user = stock.get_user(user_id)
-
-    now = datetime.utcnow().timestamp()  # 현재 UTC 시간 (초 단위)
-    last_claim = user.get("last_claim", 0)  # 기본값 0
-
-    # 1. last_claim이 문자열이면 변환 시도
-    if isinstance(last_claim, str):
         try:
-            last_claim = float(last_claim)  # 정수형 변환 시도
-        except ValueError:
-            try:
-                # 날짜 형식인 경우 datetime으로 변환 후 timestamp로 변환
-                last_claim = datetime.strptime(last_claim, "%Y-%m-%d").timestamp()
-            except ValueError:
-                last_claim = 0  # 변환 실패 시 기본값 0으로 설정
+            user_rank = next(i + 1 for i, (uid, _) in enumerate(ranking_list) if uid == str(ctx.author.id))
+            embed.set_footer(text=f"{ctx.author.display_name}님의 현재 순위: {user_rank}위")
+        except StopIteration:
+            embed.set_footer(text=f"{ctx.author.display_name}님은 아직 랭킹에 없습니다.")
+            
+        await ctx.send(embed=embed)
 
-    # 2. 출석 체크
-    if now - last_claim < 86400:  # 24시간 제한
-        await ctx.send(f"❌ {ctx.author.display_name}님은 이미 오늘 출석하셨습니다!")
-        return
+    @commands.command(name='제비뽑기', aliases=['재비', '뽑기'])
+    async def draw(self, ctx: commands.Context, *names: str):
+        """입력된 이름들 중에서 한 명을 랜덤으로 뽑습니다."""
+        if len(names) < 2:
+            return await ctx.send("2명 이상 입력해주세요! 예시: `!제비뽑기 철수 영희 민수`")
+        await ctx.send(f"🎉 당첨자는 **{random.choice(names)}** 입니다! 🎉")
 
-    # 3. 보상 지급 및 잔액 소수점 2자리 유지
-    user["balance"] = round(user["balance"] + DAILY_REWARD, 2)
-    user["last_claim"] = now  # timestamp 형식으로 저장
+    @commands.command(name='도움말', aliases=['도움'])
+    async def help_command(self, ctx: commands.Context):
+        embed = discord.Embed(title="📜 봇 도움말", description=f"명령어 접두사는 `{PREFIX}` 입니다.", color=0x5865F2)
+        embed.add_field(name="🎵 음악 명령어", value="`들어와`, `나가`, `불러봐`, `검색`, `대기열`, `스킵`, `일시정지`, `재개`, `현재곡`, `반복`, `한곡반복`", inline=False)
+        embed.add_field(name="💹 주식 명령어", value="`주식목록`, `주식구매`, `주식판매`, `내자산`, `랭킹`, `출석`", inline=False)
+        embed.add_field(name="🎲 기타 명령어", value="`제비뽑기`, `도움말`", inline=False)
+        await ctx.send(embed=embed)
 
-    stock.save_data(USER_FILE, stock.users)
+    @commands.command(name='출석')
+    async def daily_claim(self, ctx: commands.Context):
+        """하루에 한 번(자정 기준) 출석하여 보상을 받습니다."""
+        user_id = str(ctx.author.id)
+        success, result = stock.claim_daily(user_id, DAILY_REWARD)
+        
+        if success:
+            new_balance = result['new_balance']
+            await ctx.send(f"✅ {ctx.author.display_name}님, 출석 완료! **{DAILY_REWARD:,}원**이 지급되었습니다.\n현재 잔액: `${new_balance:,.2f}`")
+        else:
+            error_message = result['message']
+            await ctx.send(f"❌ {error_message}")
 
-    await ctx.send(f"✅ {ctx.author.display_name}님, 출석 완료! {DAILY_REWARD}원이 지급되었습니다. 현재 잔액: ${user['balance']:.2f}")
 
-client.run(os.getenv("DISCORD_TOKEN"))
+# --- 메인 봇 클래스 ---
+class StockBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix=PREFIX, intents=intents)
+
+    async def setup_hook(self):
+        """봇이 시작될 때 필요한 확장(cogs)을 로드하고 백그라운드 작업을 시작합니다."""
+        await self.add_cog(General(self))
+        print("🔧 'General' Cog를 로드했습니다.")
+        await self.load_extension('music')
+        print("🎵 'music' Cog를 로드했습니다.")
+        self.auto_update_stock.start()
+
+    @tasks.loop(minutes=1)
+    async def auto_update_stock(self):
+        stock.update_stock_prices()
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 📈 주식 가격 자동 갱신 완료")
+
+    @auto_update_stock.before_loop
+    async def before_auto_update_stock(self):
+        await self.wait_until_ready()
+
+    async def on_ready(self):
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 봇이 준비되었습니다: {self.user}")
+        await self.change_presence(status=discord.Status.online, activity=discord.Game(f"{PREFIX}도움말 | 음악 & 주식"))
+
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
+        """명령어에서 처리되지 않은 모든 오류를 처리합니다."""
+        if hasattr(ctx.command, 'on_error'):
+            return
+
+        ignored = (commands.CommandNotFound, )
+        if isinstance(error, ignored):
+            return
+
+        print(f"'{ctx.command.qualified_name}' 명령어에서 처리되지 않은 오류 발생: {error}", file=sys.stderr)
+        traceback.print_exc()
+        await ctx.send(f"⚠️ 알 수 없는 오류가 발생했습니다. 관리자에게 문의해주세요.")
+
+# --- 봇 실행 ---
+async def main():
+    bot = StockBot()
+    await bot.start(TOKEN)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("봇을 종료합니다.")
