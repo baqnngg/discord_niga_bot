@@ -91,7 +91,6 @@ def update_stock_prices():
     save_data(STOCK_FILE, stocks)
     return stock_changes
 
-# (이하 유저 관련 함수들은 이전과 동일하게 유지됩니다)
 # --- 유저 관련 함수 (거래 수수료 및 수량 제한 추가) ---
 def get_user(user_id):
     if user_id not in users:
@@ -214,23 +213,98 @@ def calculate_total_assets(user_id):
     total_stock_value = sum(data[0] * stocks.get(name, {}).get('price', 0) for name, data in user.get("stocks", {}).items())
     return balance + total_stock_value
 
-def process_gambling(user_id, bet_amount_str):
+# --- [수정] 도박 시스템: 게임 종류별로 함수 분리 ---
+def _validate_bet(user_id, bet_amount_str):
+    """베팅 금액 유효성 검사 및 확정 내부 함수"""
     user = get_user(user_id)
     balance = user.get("balance", 0)
-    bet_amount = balance if bet_amount_str == 'all' else int(bet_amount_str)
-    if bet_amount <= 0: return False, {'message': "베팅 금액은 0보다 커야 합니다."}
-    if balance < bet_amount: return False, {'message': f"잔액이 부족합니다. (현재 잔액: ${balance:,.2f})"}
-    reels_config = [('💎', 50, 1), ('💰', 15, 3), ('7️⃣', 7, 5), ('🍒', 3, 10), ('💔', 0, 15)]
+    
+    if bet_amount_str.lower() == 'all':
+        bet_amount = balance
+    else:
+        try:
+            bet_amount = int(bet_amount_str)
+        except ValueError:
+            return False, {'message': "숫자로 된 베팅 금액을 입력해주세요."}
+
+    if bet_amount <= 0:
+        return False, {'message': "베팅 금액은 0보다 커야 합니다."}
+    if balance < bet_amount:
+        return False, {'message': f"잔액이 부족합니다. (현재 잔액: ${balance:,.2f})"}
+        
+    return True, {'user': user, 'bet_amount': bet_amount}
+
+def process_slot_machine(user_id, bet_amount_str):
+    """슬롯머신 게임 로직"""
+    is_valid, result = _validate_bet(user_id, bet_amount_str)
+    if not is_valid:
+        return False, result
+
+    user, bet_amount = result['user'], result['bet_amount']
+
+    reels_config = [
+        ('💎', 20, 2),
+        ('💰', 10, 5),
+        ('7️⃣', 5, 8),
+        ('🍒', 2, 12),
+        ('💔', 0, 10)
+    ]
     symbols = [item[0] for item in reels_config]
     weights = [item[2] for item in reels_config]
+    
     reels_result = random.choices(symbols, weights=weights, k=3)
     winnings = 0
+    
     if reels_result[0] == reels_result[1] == reels_result[2]:
         symbol = reels_result[0]
         multiplier = next((item[1] for item in reels_config if item[0] == symbol), 0)
         winnings = bet_amount * multiplier
-    elif reels_result[0] == reels_result[1] or reels_result[1] == reels_result[2]:
-        if '💔' not in reels_result: winnings = bet_amount * 2
+    elif reels_result.count('🍒') == 2:
+        winnings = bet_amount 
+
     user['balance'] += winnings - bet_amount
     save_users()
     return True, {'reels': reels_result, 'winnings': winnings, 'bet_amount': bet_amount, 'new_balance': user['balance']}
+
+def process_dice_roll(user_id, bet_amount_str):
+    """주사위 게임 로직"""
+    is_valid, result = _validate_bet(user_id, bet_amount_str)
+    if not is_valid:
+        return False, result
+
+    user, bet_amount = result['user'], result['bet_amount']
+    
+    dice1 = random.randint(1, 6)
+    dice2 = random.randint(1, 6)
+    dice_sum = dice1 + dice2
+    winnings = 0
+    
+    if dice1 == dice2:
+        winnings = bet_amount * 4
+    elif dice_sum == 7:
+        winnings = bet_amount * 2
+        
+    user['balance'] += winnings - bet_amount
+    save_users()
+    return True, {'dices': [dice1, dice2], 'winnings': winnings, 'bet_amount': bet_amount, 'new_balance': user['balance']}
+
+def process_coin_flip(user_id, bet_amount_str, choice):
+    """동전던지기 게임 로직"""
+    is_valid, result = _validate_bet(user_id, bet_amount_str)
+    if not is_valid:
+        return False, result
+
+    user, bet_amount = result['user'], result['bet_amount']
+
+    if choice not in ['앞', '뒤']:
+        return False, {'message': "'앞' 또는 '뒤'를 선택해주세요."}
+
+    coin_result = random.choice(['앞', '뒤'])
+    winnings = 0
+
+    if choice == coin_result:
+        winnings = bet_amount * 2
+    
+    user['balance'] += winnings - bet_amount
+    save_users()
+    return True, {'result': coin_result, 'choice': choice, 'winnings': winnings, 'bet_amount': bet_amount, 'new_balance': user['balance']}

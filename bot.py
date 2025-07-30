@@ -180,62 +180,203 @@ class General(commands.Cog, name="주식"):
             await ctx.send(f"✅ {ctx.author.display_name}님, 출석 완료! **{DAILY_REWARD:,}원**이 지급되었습니다.\n현재 잔액: `${result['new_balance']:,.2f}`")
         else:
             await ctx.send(f"❌ {result['message']}")
-
-    @commands.command(name='도박', aliases=['슬롯'])
-    async def gamble(self, ctx: commands.Context, amount_str: str):
+            
+    # --- [수정] 새로운 도박 명령어 (도움말 기능 강화) ---
+    @commands.command(name='도박', aliases=['겜블'])
+    async def gamble(self, ctx: commands.Context, game_type: str = None, *, args: str = None):
+        """
+        다양한 도박 게임을 즐깁니다.
+        !도박 을 입력하여 자세한 도움말을 확인하세요.
+        """
         user_id = str(ctx.author.id)
-        if amount_str.lower() != 'all' and (not amount_str.isdigit() or int(amount_str) <= 0):
-            return await ctx.send("❌ 베팅할 금액은 0보다 큰 숫자 또는 'all'이어야 합니다.")
-        voice_client = None
-        if ctx.author.voice and ctx.author.voice.channel:
-            if ctx.voice_client: voice_client = await ctx.voice_client.move_to(ctx.author.voice.channel)
-            else: voice_client = await ctx.author.voice.channel.connect()
-        success, result = stock.process_gambling(user_id, amount_str.lower())
-        if not success:
-            if voice_client: await voice_client.disconnect()
-            return await ctx.send(f"❌ 도박 실패: {result['message']}")
-        try:
-            emojis, final_reels = ['💎', '💰', '7️⃣', '🍒', '💔'], result['reels']
-            embed = discord.Embed(title="🎰 슬롯머신 🎰", description="릴이 돌아갑니다...", color=discord.Color.light_grey())
-            embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-            embed.add_field(name="결과", value="[ ❓ | ❓ | ❓ ]", inline=False)
-            message = await ctx.send(embed=embed)
-            if voice_client: voice_client.play(discord.FFmpegPCMAudio(os.path.join('sounds', 'spin.mp3')))
-            await asyncio.sleep(1)
-            for _ in range(2):
-                spinning_reels = [random.choice(emojis) for _ in range(3)]
-                embed.set_field_at(0, name="결과", value=f"[ {spinning_reels[0]} | {spinning_reels[1]} | {spinning_reels[2]} ]", inline=False)
-                await message.edit(embed=embed)
-                await asyncio.sleep(0.7)
-            revealed_reels = ["❓", "❓", "❓"]
-            for i in range(3):
-                revealed_reels[i] = final_reels[i]
-                embed.set_field_at(0, name="결과", value=f"[ {revealed_reels[0]} | {revealed_reels[1]} | {revealed_reels[2]} ]", inline=False)
-                await message.edit(embed=embed)
+        
+        # ⭐ 게임 종류를 입력하지 않았을 경우, 상세 도움말 표시
+        if not game_type:
+            embed = discord.Embed(
+                title="🎲 도박 게임 도움말 🎲",
+                description=f"원하는 게임을 선택하여 `{PREFIX}도박 <게임이름> <베팅금액>` 형식으로 즐겨보세요!",
+                color=discord.Color.gold()
+            )
+            embed.set_footer(text="<금액> 대신 'all'을 입력하여 전재산을 베팅할 수 있습니다.")
+
+            # 슬롯머신 설명
+            embed.add_field(
+                name="🎰 슬롯머신",
+                value=(
+                    f"`{PREFIX}도박 슬롯 <금액>`\n"
+                    "세 개의 릴을 돌려 같은 그림이 나오면 승리!\n\n"
+                    "**[배당률]**\n"
+                    "💎💎💎 : **20배**\n"
+                    "💰💰💰 : **10배**\n"
+                    "7️⃣7️⃣7️⃣ : **5배**\n"
+                    "🍒🍒🍒 : **2배**\n"
+                    "🍒 두 개 포함 시 : **본전**"
+                ),
+                inline=False
+            )
+
+            # 주사위 설명
+            embed.add_field(
+                name="\n🎲 주사위",
+                value=(
+                    f"`{PREFIX}도박 주사위 <금액>`\n"
+                    "두 개의 주사위를 굴려 특정 조건에 맞으면 승리!\n\n"
+                    "**[승리 조건]**\n"
+                    "💠 더블 (같은 숫자 2개) : **4배**\n"
+                    "7️⃣ 두 주사위 합이 7 : **2배**"
+                ),
+                inline=False
+            )
+            
+            # 동전던지기 설명
+            embed.add_field(
+                name="\n🪙 동전던지기",
+                value=(
+                    f"`{PREFIX}도박 동전 <앞/뒤> <금액>`\n"
+                    "간단하게 동전의 앞/뒤를 맞추는 50:50 게임!\n\n"
+                    "**[승리 조건]**\n"
+                    "✅ 예측 성공 시 : **2배**"
+                ),
+                inline=False
+            )
+            
+            return await ctx.send(embed=embed)
+
+        # 인자(args) 파싱
+        bet_amount_str = None
+        choice = None
+        if args:
+            parts = args.split()
+            if game_type == "동전":
+                if len(parts) == 2:
+                    choice, bet_amount_str = parts[0], parts[1]
+                else:
+                    return await ctx.send("❌ 사용법: `!도박 동전 <앞/뒤> <금액>`")
+            else:
+                bet_amount_str = parts[0]
+        
+        if not bet_amount_str:
+            return await ctx.send("❌ 베팅할 금액을 입력해주세요.")
+
+        # --- 슬롯 머신 ---
+        if game_type == "슬롯":
+            success, result = stock.process_slot_machine(user_id, bet_amount_str)
+            if not success:
+                return await ctx.send(f"❌ 슬롯머신 실패: {result['message']}")
+            
+            voice_client = None
+            if ctx.author.voice and ctx.author.voice.channel:
+                if ctx.voice_client: voice_client = await ctx.voice_client.move_to(ctx.author.voice.channel)
+                else: voice_client = await ctx.author.voice.channel.connect()
+
+            try:
+                emojis = ['💎', '💰', '7️⃣', '🍒', '💔']
+                embed = discord.Embed(title="🎰 슬롯머신 🎰", description="릴이 돌아갑니다...", color=discord.Color.light_grey())
+                embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+                embed.add_field(name="결과", value="[ ❓ | ❓ | ❓ ]", inline=False)
+                message = await ctx.send(embed=embed)
+                if voice_client: voice_client.play(discord.FFmpegPCMAudio(os.path.join('sounds', 'spin.mp3')))
+                
                 await asyncio.sleep(1)
-            while voice_client and voice_client.is_playing(): await asyncio.sleep(0.1)
+                for _ in range(2):
+                    spinning_reels = [random.choice(emojis) for _ in range(3)]
+                    embed.set_field_at(0, name="결과", value=f"[ {spinning_reels[0]} | {spinning_reels[1]} | {spinning_reels[2]} ]", inline=False)
+                    await message.edit(embed=embed)
+                    await asyncio.sleep(0.7)
+
+                final_reels = result['reels']
+                revealed_reels = ["❓", "❓", "❓"]
+                for i in range(3):
+                    revealed_reels[i] = final_reels[i]
+                    embed.set_field_at(0, name="결과", value=f"[ {revealed_reels[0]} | {revealed_reels[1]} | {revealed_reels[2]} ]", inline=False)
+                    await message.edit(embed=embed)
+                    await asyncio.sleep(1)
+                
+                while voice_client and voice_client.is_playing(): await asyncio.sleep(0.1)
+                
+                if result['winnings'] > result['bet_amount']:
+                    embed.description = f"🎉 **축하합니다! `{result['winnings'] - result['bet_amount']:,.0f}원` 획득!** 🎉"
+                    embed.color = discord.Color.green()
+                    if voice_client: voice_client.play(discord.FFmpegPCMAudio(os.path.join('sounds', 'win.mp3')))
+                elif result['winnings'] > 0:
+                    embed.description = f"🎉 **본전입니다! `{result['bet_amount']:,.0f}원`을 돌려받았습니다!** 🎉"
+                    embed.color = discord.Color.blue()
+                else:
+                    embed.description = f"💸 **아쉽네요... `{result['bet_amount']:,.0f}원`을 잃었습니다.** 💸"
+                    embed.color = discord.Color.red()
+                    if voice_client: voice_client.play(discord.FFmpegPCMAudio(os.path.join('sounds', 'lose.mp3')))
+
+                embed.add_field(name="현재 잔액", value=f"`${result['new_balance']:,.2f}`", inline=False)
+                await message.edit(embed=embed)
+                
+            finally:
+                if voice_client:
+                    while voice_client.is_playing(): await asyncio.sleep(0.1)
+                    await asyncio.sleep(1)
+                    await voice_client.disconnect()
+        
+        # --- 주사위 게임 ---
+        elif game_type == "주사위":
+            success, result = stock.process_dice_roll(user_id, bet_amount_str)
+            if not success:
+                return await ctx.send(f"❌ 주사위 게임 실패: {result['message']}")
+
+            embed = discord.Embed(title="🎲 주사위 게임 🎲", color=discord.Color.dark_orange())
+            embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+            dices = result['dices']
+            dice_emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣']
+            embed.add_field(name="결과", value=f"{dice_emojis[dices[0]-1]} + {dice_emojis[dices[1]-1]} = **{sum(dices)}**")
+
             if result['winnings'] > 0:
-                embed.description = f"🎉 **축하합니다! `{result['winnings']:,.0f}원` 획득!** 🎉"
+                embed.description = f"🎉 **축하합니다! `{result['winnings'] - result['bet_amount']:,.0f}원` 획득!** 🎉"
                 embed.color = discord.Color.green()
-                if voice_client: voice_client.play(discord.FFmpegPCMAudio(os.path.join('sounds', 'win.mp3')))
             else:
                 embed.description = f"💸 **아쉽네요... `{result['bet_amount']:,.0f}원`을 잃었습니다.** 💸"
                 embed.color = discord.Color.red()
-                if voice_client: voice_client.play(discord.FFmpegPCMAudio(os.path.join('sounds', 'lose.mp3')))
+            
             embed.add_field(name="현재 잔액", value=f"`${result['new_balance']:,.2f}`", inline=False)
-            await message.edit(embed=embed)
-            while voice_client and voice_client.is_playing(): await asyncio.sleep(0.1)
-        finally:
-            if voice_client:
-                await asyncio.sleep(1)
-                await voice_client.disconnect()
-                
+            await ctx.send(embed=embed)
+
+        # --- 동전던지기 게임 ---
+        elif game_type == "동전":
+            if not choice: return await ctx.send("❌ 사용법: `!도박 동전 <앞/뒤> <금액>`")
+            success, result = stock.process_coin_flip(user_id, bet_amount_str, choice)
+            if not success:
+                return await ctx.send(f"❌ 동전던지기 실패: {result['message']}")
+
+            embed = discord.Embed(title="🪙 동전 던지기 🪙", color=discord.Color.light_grey())
+            embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+            embed.add_field(name="나의 선택", value=f"**{result['choice']}**", inline=True)
+            embed.add_field(name="결과", value=f"**{result['result']}**", inline=True)
+
+            if result['winnings'] > 0:
+                embed.description = f"🎉 **축하합니다! `{result['winnings'] - result['bet_amount']:,.0f}원` 획득!** 🎉"
+                embed.color = discord.Color.green()
+            else:
+                embed.description = f"💸 **아쉽네요... `{result['bet_amount']:,.0f}원`을 잃었습니다.** 💸"
+                embed.color = discord.Color.red()
+
+            embed.add_field(name="현재 잔액", value=f"`${result['new_balance']:,.2f}`", inline=False)
+            await ctx.send(embed=embed)
+        
+        else:
+            await ctx.send(f"❌ 알 수 없는 게임 종류입니다: `{game_type}`\n(선택 가능: 슬롯, 주사위, 동전)")
+
+
+    @commands.command(name='제비뽑기', aliases=['재비', '뽑기'])
+    async def draw(self, ctx: commands.Context, *names: str):
+        """입력된 이름들 중에서 한 명을 랜덤으로 뽑습니다."""
+        if len(names) < 2:
+            return await ctx.send("2명 이상 입력해주세요! 예시: `!제비뽑기 철수 영희 민수`")
+        await ctx.send(f"🎉 당첨자는 **{random.choice(names)}** 입니다! 🎉")
+
+
     @commands.command(name='도움말', aliases=['도움'])
     async def help_command(self, ctx: commands.Context):
         embed = discord.Embed(title="📜 봇 도움말", description=f"명령어 접두사는 `{PREFIX}` 입니다.", color=0x5865F2)
         embed.add_field(name="🎵 음악 명령어", value="`들어와`, `나가`, `불러봐`, `검색`, `대기열`, `스킵`, `일시정지`, `재개`, `현재곡`, `반복`, `한곡반복`", inline=False)
         embed.add_field(name="💹 주식 명령어", value="`주식목록`, `주식정보`, `주식구매`, `주식판매`, `내자산`, `랭킹`, `출석`", inline=False)
-        embed.add_field(name="🎲 기타 명령어", value="`도박`, `도움말`", inline=False)
+        embed.add_field(name="🎲 도박 및 기타", value="`도박`, `도움말`, `제비뽑기`\n(`!도박`을 입력하여 게임 종류를 확인하세요!)", inline=False)
         await ctx.send(embed=embed)
 
 
@@ -273,6 +414,9 @@ class StockBot(commands.Bot):
         if hasattr(ctx.command, 'on_error'): return
         if isinstance(error, commands.CommandNotFound): return
         
+        if isinstance(error, commands.MissingRequiredArgument):
+            return await ctx.send(f"❌ 명령어 사용법이 잘못되었습니다. `!도움말`을 확인해주세요.\n> 오류: `{error}`")
+
         print(f"'{ctx.command.qualified_name}' 명령어에서 처리되지 않은 오류 발생: {error}", file=sys.stderr)
         traceback.print_exc()
         await ctx.send(f"⚠️ 알 수 없는 오류가 발생했습니다. 명령어와 형식을 다시 확인해주세요.")
