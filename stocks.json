@@ -1,6 +1,58 @@
 {
-    "Apple": 168.9,
-    "Tesla": 749.07,
-    "Amazon": 2937.2,
-    "Google": 2623.15
+    "Apple": {
+        "price": 164.21,
+        "sector": "IT",
+        "volatility": 1.0,
+        "total_shares": 10000,
+        "available_shares": 10960
+    },
+    "Google": {
+        "price": 122.01,
+        "sector": "IT",
+        "volatility": 1.1,
+        "total_shares": 8500,
+        "available_shares": 8500
+    },
+    "NVIDIA": {
+        "price": 462.39,
+        "sector": "IT",
+        "volatility": 2.2,
+        "total_shares": 5000,
+        "available_shares": 5000
+    },
+    "Tesla": {
+        "price": 259.51,
+        "sector": "자동차",
+        "volatility": 1.8,
+        "total_shares": 7000,
+        "available_shares": 7000
+    },
+    "Pfizer": {
+        "price": 31.24,
+        "sector": "바이오",
+        "volatility": 0.8,
+        "total_shares": 20000,
+        "available_shares": 20000
+    },
+    "JPMorgan": {
+        "price": 147.95,
+        "sector": "금융",
+        "volatility": 0.7,
+        "total_shares": 15000,
+        "available_shares": 15000
+    },
+    "Coca-Cola": {
+        "price": 59.08,
+        "sector": "소비재",
+        "volatility": 0.5,
+        "total_shares": 30000,
+        "available_shares": 30000
+    },
+    "Samsung": {
+        "price": 69.92,
+        "sector": "IT",
+        "volatility": 1.2,
+        "total_shares": 25000,
+        "available_shares": 25000
+    }
 }
